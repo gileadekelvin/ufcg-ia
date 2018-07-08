@@ -1,0 +1,209 @@
+---
+title: IA - Atividade Extra Raciocínio baseado em casos
+author: Gileade Kelvin
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+---
+
+## Pacotes utilizados
+```{r results='hide', message=FALSE, warning=FALSE}
+library(here)
+library(dplyr)
+library(class)
+library(GGally)
+library(knitr)
+options(scipen = 999)
+```
+
+## Importando dados
+```{r}
+cars_original <- read.csv("data.csv", stringsAsFactors = FALSE)
+```
+
+O conjunto de dados usado nesta atividade consiste em 11914 observações que detalham carros em 16 variáveis. Citadas a seguir:
+
+```{r}
+colnames(cars_original)
+```
+
+A maioria destas variáveis têm nomes autoexplicativos mas vale destacar que MSRP é o preço do carro. 
+O objetivo desta atividade é estimar o preço de um carro (MSRP) através de um conjunto de features presentes nos dados como Marca, potência do motor, ano, dentre outras.
+
+Para isso foi utilizado como base o material [How to Build a CBR system](https://www.cs.auckland.ac.nz/~ian/CBR/how%20to%20build%20a%20CBR%20system.pdf).
+
+A seguir são apresentados o tratamento nos dados e os resultados obtidos.
+
+## Criando lista ordenada para as variáveis categóricas que foram selecionadas como features
+
+Apenas duas variáveis categóricas foram escolhidas para a criação do modelo. São elas Make, a marca do carro, e Market.Category que define a categoria do carro no mercado automobilístico. Como descrito no material base utilizado, para lidar com variáveis categóricas é preciso criar uma lista ordenada para que a distância entre as marcas possa ser viavelmente calcular. A lista ordenada foi definida como a ordem crescente das marcas de acordo com suas respectivas medianas de preço quando agrupadas.
+```{r}
+cars <- cars_original %>% 
+  group_by(Make) %>% 
+  mutate(Make_median = median(MSRP)) %>% 
+  ungroup() %>% 
+  group_by(Market.Category) %>% 
+  mutate(Market.Category_median = median(MSRP)) %>% 
+  ungroup()
+```
+
+## Selecionando features e variável de interesse
+
+A lista de features que serão utilizadas para criar o sistema CBR é: Make_median, Market.Category_median, Year, Engine.HP, Engine.Cylinders, Number.of.Doors, highway.MPG, city.mpg, Popularity. Observações que possuem valor NA em alguma dessas colunas foram removidas dos dados.
+
+A variável de interesse é o preço do carro: **MSRP**.
+
+```{r}
+cars_select <- cars %>% 
+  select(Make_median, Market.Category_median, Year, Engine.HP, Engine.Cylinders, Number.of.Doors, highway.MPG, city.mpg, Popularity, MSRP) %>% 
+  na.omit()
+```
+
+## Dividindo dados em conjunto de treino e de validação
+
+A divisão foi feita em dois conjuntos, um de treino com 80% dos dados e outro de validação com 20 % dos dados.
+```{r}
+set.seed(1234)
+sample_size <- floor(0.80 * nrow(cars_select))
+train_ind <- sample(seq_len(nrow(cars_select)), size = sample_size)
+
+train_data <- cars_select[train_ind, ]
+validation_data <- cars_select[-train_ind, ]
+```
+
+## Análise exploratória da base de dados de treino
+
+A visualização a seguir mostra a correlação de pearson entre as variáveis e a partir dela é possível entender mais um pouco sobre o comportamento dos dados. Essa visualização serviu como base para a definição dos pesos utilizados na estimação dos vizinhos mais próximos.
+
+```{r}
+train_data %>%
+  ggpairs()
+```
+
+## Define função para calcular similaridade e média dos preços dos vizinhos mais próximos
+
+O código abaixo define uma função que é responsável por calcular a média dos k vizinhos, do conjunto de treino passado como parâmetro, mais similares paca cada observação do conjunto de teste também passado como parâmetro.
+
+```{r}
+## Lista de colunas que são features para o treino
+colunas <- colnames(train_data %>% select(-MSRP))
+
+## Número de features
+n_colunas <- length(colunas)
+
+## Peso de cada feature para o cálculo de similaridade
+pesos <- c(10, 10, 5, 8, 7, 2, 2, 1, 1)
+
+determina_preco_medio <- function(treino, teste) {
+  
+  resultado_teste <- data.frame()
+  local_similaridade <- treino
+  
+  ## Executa em todas as linhas do conjunto de teste
+  for(j in 1:nrow(teste)) {
+    
+    ## Seleciona a linha/observacao corrente no laço
+    observacao <- as.vector(as.numeric(teste[j,]))
+    ID_j <- observacao[1]
+    
+    ## Calcula a similaridade da observação com relação a todos os casos do conjunto de treino para todas as features
+    for (i in 1:n_colunas) {
+      temp <- treino %>%
+        mutate(range = max(get(colunas[i])) - min(get(colunas[i]))) %>% 
+        mutate(sim = (range - abs(get(colunas[i]) - observacao[i+1])) / range) %>% 
+        mutate(w_sim = sim * pesos[i]) %>% 
+        select(w_sim)
+    
+      local_similaridade <- local_similaridade %>% cbind(temp)
+    }
+    
+    ## Seleciona todas as similaridades locais calculadas para a linha/observação corrente
+    similaridade <- local_similaridade[tail(seq_along(local_similaridade),n_colunas+1)]
+    
+    ## Calcular a similaridade global como a soma das similaridades locais dividida pela soma dos pesos definidos
+    similaridade$global <- rowSums(similaridade %>% select(-MSRP)) / sum(pesos)
+  
+    ## Seleciona os 10 casos com maior similaridade com relação a linha/observação corrente
+    similaridade_k <- similaridade %>% 
+      arrange(desc(global)) %>% 
+      slice(1:10) %>% 
+      mutate(id = ID_j)
+    
+    ## Renomeia as colunas e calcula a média dos preços dos k vizinhos mais similares a linha/observação corrente. Sendo k variando de 1 a 10.
+    res <- as.data.frame(t(observacao)) %>% 
+      select(id = V1, Make_median = V2, Market.Category_median = V3, Year = V4, Engine.HP = V5, Engine.Cylinders = V6, Number.of.Doors = V7, 
+             highway.MPG = V8, city.mpg = V9, Popularity = V10, MSRP = V11) %>% 
+      cbind(media1 = mean((similaridade_k %>% slice(1:1))$MSRP)) %>% 
+      cbind(media2 = mean((similaridade_k %>% slice(1:2))$MSRP)) %>% 
+      cbind(media3 = mean((similaridade_k %>% slice(1:3))$MSRP)) %>% 
+      cbind(media4 = mean((similaridade_k %>% slice(1:4))$MSRP)) %>% 
+      cbind(media5 = mean((similaridade_k %>% slice(1:5))$MSRP)) %>% 
+      cbind(media6 = mean((similaridade_k %>% slice(1:6))$MSRP)) %>% 
+      cbind(media7 = mean((similaridade_k %>% slice(1:7))$MSRP)) %>% 
+      cbind(media8 = mean((similaridade_k %>% slice(1:8))$MSRP)) %>% 
+      cbind(media9 = mean((similaridade_k %>% slice(1:9))$MSRP)) %>% 
+      cbind(media10 = mean((similaridade_k %>% slice(1:10))$MSRP))
+    
+    ## Concatena o resultado da linha/observação corrente ao dataframe do resultado final
+    resultado_teste <- resultado_teste %>% 
+      rbind(res)
+    
+    ## Reinicia treino para a pŕoxima linha/observação corrente
+    local_similaridade <- treino
+  }
+  
+  return(resultado_teste)
+}
+```
+
+## Estima médias de preço para o conjunto de validação
+
+Agora vamos utilizar a função para criar um dataframe que possua os resultados finais para o o conjunto de validação definido acima.
+```{r}
+final <- determina_preco_medio(train_data, validation_data %>% tibble::rowid_to_column("id"))
+```
+
+A seguir vamos definir uma medida de erro como sendo o quadrado da diferença entre o preço estimado e o preço real do carro, para o conjunto de validação.
+
+```{r}
+evaluate_validation_result <- final %>%
+  select(MSRP, media1, media2, media3, media4, media5, media6, media7, media8, media9, media10) %>%
+  mutate(erro1 = (MSRP - media1)^2) %>%
+  mutate(erro2 = (MSRP - media2)^2) %>%
+  mutate(erro3 = (MSRP - media3)^2) %>%
+  mutate(erro4 = (MSRP - media4)^2) %>%
+  mutate(erro5 = (MSRP - media5)^2) %>%
+  mutate(erro6 = (MSRP - media6)^2) %>%
+  mutate(erro7 = (MSRP - media7)^2) %>%
+  mutate(erro8 = (MSRP - media8)^2) %>%
+  mutate(erro9 = (MSRP - media9)^2) %>%
+  mutate(erro10 = (MSRP - media10)^2)
+```
+
+Para cada k, de 1 a 10, é calculada a soma acumulada dos erros para cada observação do conjunto de validação.
+```{r}
+validation_errors <- data_frame(1, sum(evaluate_validation_result$erro1)) %>%
+  rbind(c(2, sum(evaluate_validation_result$erro2))) %>%
+  rbind(c(3, sum(evaluate_validation_result$erro3))) %>%
+  rbind(c(4, sum(evaluate_validation_result$erro4))) %>%
+  rbind(c(5, sum(evaluate_validation_result$erro5))) %>%
+  rbind(c(6, sum(evaluate_validation_result$erro6))) %>%
+  rbind(c(7, sum(evaluate_validation_result$erro7))) %>%
+  rbind(c(8, sum(evaluate_validation_result$erro8))) %>%
+  rbind(c(9, sum(evaluate_validation_result$erro9))) %>%
+  rbind(c(10, sum(evaluate_validation_result$erro10)))
+
+colnames(validation_errors) <- c("k", "soma_erros")
+```
+
+Esse é o resultado final apresentado por k. Podemos concluir que para o conjunto de treino e validação utilizados, considerando os pesos que foram determinados e a métrica definida o resultado por k, que varia de 1 a 10, mostra que o melhor valor de k é 3. Ou seja, se os 3 vizinhos mais próximos forem considerados para a estimação do preço os resultados são os melhores.
+
+```{r}
+kable(validation_errors %>%
+        arrange(soma_erros),
+      col.names = c("k", "Soma dos erros"),
+      align = "cc")
+```
+
+
